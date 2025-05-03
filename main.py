@@ -67,9 +67,13 @@ def run_training_and_forecast():
 
     try:
         info = json.loads(raw_google)
-        creds = Credentials.from_service_account_info(info)
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        creds = Credentials.from_service_account_info(info, scopes=scopes)
         client = gspread.authorize(creds)
-        print("✅ Authorized Google Sheets")
+        print("✅ Authorized Google Sheets với scopes:", scopes)
     except Exception as e:
         print("❌ Lỗi xử lý GOOGLE_SERVICE_JSON hoặc authorize:", e)
         return
