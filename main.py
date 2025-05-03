@@ -50,7 +50,7 @@ def run_training_and_forecast():
     print("\n🔁 Bắt đầu kiểm tra và huấn luyện...")
 
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    json_str = os.environ.get("GOOGLE_SERVICE_JSON")
+    json_str = os.environ.get("GOOGLE_SERVICE")
     sheet_url = os.environ.get("SHEET_URL")
 
     print("🧪 GOOGLE_SERVICE_JSON is set:", json_str is not None)
