@@ -1,4 +1,3 @@
-import traceback
 import pandas as pd
 import numpy as np
 import json
@@ -11,11 +10,11 @@ from tensorflow.keras.layers import GRU, Dense, Input
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.losses import MeanSquaredError
 import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 import firebase_admin
 from firebase_admin import credentials, db
 import smtplib
 from email.mime.text import MIMEText
-from google.oauth2 import service_account
 from pytz import timezone
 
 def send_email_notification(message):
@@ -51,59 +50,42 @@ def run_training_and_forecast():
     print("\n🔁 Bắt đầu kiểm tra và huấn luyện...")
 
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    json_str = os.environ.get("google_service_json")
+    json_str = os.environ.get("GOOGLE_SERVICE_JSON")
     sheet_url = os.environ.get("SHEET_URL")
 
-    print("🧪 GOOGLE_SERVICE_JSON is valid:", json_str[:100] if json_str else "None")
+    print("🧪 GOOGLE_SERVICE_JSON is set:", json_str is not None)
     print("📄 SHEET_URL =", sheet_url)
 
     if not json_str or not sheet_url:
-        print("❌ Thiếu GOOGLE_SERVICE_JSON hoặc SHEET_URL!")
+        print("❌ Thiếu GOOGLE_SERVICE_JSON hoặc SHEET_URL")
         return
 
     try:
-        print("🔍 Đang kiểm tra định dạng JSON...")
         google_key = json.loads(json_str)
-        if "private_key" not in google_key:
-            raise ValueError("⚠️ Không tìm thấy khóa 'private_key' trong GOOGLE_SERVICE_JSON")
-
-        google_key["private_key"] = google_key["private_key"].replace("\\n", "\n")
-
-        print("✅ JSON nạp thành công.")
-
-        creds = service_account.Credentials.from_service_account_info(google_key, scopes=scope)
-        print("🔑 Đã tạo credentials.")
-
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(google_key, scope)
         client = gspread.authorize(creds)
-        print("📡 Đã xác thực gspread.")
-
         sheet = client.open_by_url(sheet_url.strip())
         worksheet = sheet.worksheet("DATA")
         data = pd.DataFrame(worksheet.get_all_records())
-
     except Exception as e:
-        print("❌ Lỗi truy cập Google Sheets:")
-        traceback.print_exc()
-        print("📌 Gợi ý:")
-        print("- Đảm bảo biến GOOGLE_SERVICE_JSON đúng định dạng JSON một dòng.")
-        print("- Chuỗi private_key phải có dạng '\\n' thay vì dòng mới.")
-        print("- Email service account phải được chia sẻ quyền chỉnh sửa Google Sheets.")
+        print("❌ Lỗi truy cập Google Sheets:", e)
         return
 
     data.columns = data.columns.str.strip()
     try:
-        data["timestamp"] = pd.to_datetime(data["NGÀY"] + " " + data["GIỜ"], format="%d/%m/%Y %H:%M:%S")
+        data['timestamp'] = pd.to_datetime(data['NGÀY'] + ' ' + data['GIỜ'], format='%d/%m/%Y %H:%M:%S')
     except KeyError as e:
         print("❌ Lỗi cột thiếu:", e)
         print("📋 Danh sách cột:", data.columns.tolist())
         return
 
-    data = data.sort_values("timestamp")
+    data = data.sort_values('timestamp')
     data.rename(columns={
-        "temperature": "temp", "humidity": "humid", "soil_moisture": "soil",
-        "wind": "wind", "rain": "rain"
+        'temperature': 'temp', 'humidity': 'humid', 'soil_moisture': 'soil',
+        'wind': 'wind', 'rain': 'rain'
     }, inplace=True)
 
+    # Tích lũy dữ liệu cũ
     if os.path.exists("training_data.csv"):
         old_data = pd.read_csv("training_data.csv", parse_dates=["timestamp"])
         data = pd.concat([old_data, data])
@@ -122,11 +104,11 @@ def run_training_and_forecast():
         send_email_notification("🟡 KHÔNG có dữ liệu mới để huấn luyện.")
         return
 
-    features = ["temp", "humid", "soil", "wind", "rain"]
+    features = ['temp', 'humid', 'soil', 'wind', 'rain']
     scaler = MinMaxScaler()
     scaled_data = scaler.fit_transform(data[features])
 
-    model_path = "gru_weather_model.h5"
+    model_path = "gru_weather_model.keras"
     window_size = 6
 
     if not os.path.exists(model_path):
@@ -153,6 +135,7 @@ def run_training_and_forecast():
     with open("last_timestamp.json", "w") as f:
         json.dump({"last_timestamp": str(latest_timestamp)}, f)
 
+    # Dự báo
     current_seq = scaled_data[-window_size:].copy()
     forecast = []
     for _ in range(24):
@@ -160,7 +143,6 @@ def run_training_and_forecast():
         y_pred = model.predict(x_input, verbose=0)
         forecast.append(y_pred[0])
         current_seq = np.vstack([current_seq[1:], y_pred])
-
     forecast_original = scaler.inverse_transform(np.array(forecast))
     forecast_df = pd.DataFrame(forecast_original, columns=features).clip(lower=0).round(2)
     base_time = datetime.now(timezone("Asia/Ho_Chi_Minh")) + timedelta(days=1)
@@ -184,6 +166,7 @@ def run_training_and_forecast():
 
     send_email_notification("🟢 Dự báo mới đã được huấn luyện và cập nhật.")
     print("✅ XONG lúc", datetime.now(timezone("Asia/Ho_Chi_Minh")).strftime("%H:%M:%S %d/%m/%Y"))
+
 
 if __name__ == "__main__":
     while True:
