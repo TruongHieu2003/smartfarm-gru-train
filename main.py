@@ -1,8 +1,6 @@
+import os, json, time, base64
 import pandas as pd
 import numpy as np
-import json
-import os
-import time
 from datetime import datetime, timedelta
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential, load_model
@@ -22,20 +20,15 @@ def send_email_notification(message):
         smtp_user = os.environ.get("EMAIL_USER")
         smtp_pass = os.environ.get("EMAIL_PASSWORD")
         receivers = os.environ.get("Email_Receiver")
-
         if not smtp_user or not smtp_pass or not receivers:
             print("⚠️ Thiếu thông tin SMTP.")
             return
 
-        receiver_list = [email.strip() for email in receivers.split(",")]
-
+        receiver_list = [e.strip() for e in receivers.split(",")]
         subject = "SmartFarm - Trạng thái cập nhật dữ liệu"
         body = f"{message}\n\nThời gian: {datetime.now(timezone('Asia/Ho_Chi_Minh')).strftime('%H:%M %d/%m/%Y')}"
-
         msg = MIMEText(body)
-        msg["Subject"] = subject
-        msg["From"] = smtp_user
-        msg["To"] = ", ".join(receiver_list)
+        msg["Subject"], msg["From"], msg["To"] = subject, smtp_user, ", ".join(receiver_list)
 
         server = smtplib.SMTP("smtp.gmail.com", 587)
         server.starttls()
@@ -46,184 +39,168 @@ def send_email_notification(message):
     except Exception as e:
         print("❌ Lỗi gửi mail:", e)
 
+def load_json_from_env(b64_var, txt_var):
+    """
+    Ưu tiên decode từ <*_B64>, nếu không có thì dùng <*_JSON> và replace '\\n' → '\n'
+    """
+    b64 = os.environ.get(b64_var)
+    if b64:
+        try:
+            return base64.b64decode(b64).decode("utf-8")
+        except Exception as e:
+            print(f"⚠️ Không decode được {b64_var}:", e)
+    raw = os.environ.get(txt_var, "")
+    return raw.replace('\\n', '\n')
+
 def run_training_and_forecast():
     print("\n🔁 Bắt đầu kiểm tra và huấn luyện...\n")
 
-    # 🧪 Kiểm tra biến môi trường cho Google Sheets
-    raw_json = os.environ.get("GOOGLE_SERVICE_JSON")
-    if raw_json:
-        # convert literal '\n' into actual newline
-        raw_json = raw_json.replace('\\n', '\n')
+    # --- Google Sheets credentials & data load ---
+    raw_google = load_json_from_env("GOOGLE_SERVICE_JSON_B64", "GOOGLE_SERVICE_JSON")
     sheet_url = os.environ.get("SHEET_URL", "").strip()
-
     print("🔍 Kiểm tra biến môi trường:")
-    print("GOOGLE_SERVICE_JSON tồn tại:", bool(raw_json))
+    print("GOOGLE_SERVICE_JSON tồn tại:", bool(raw_google))
     print("SHEET_URL:", sheet_url)
-
-    if not raw_json or not sheet_url:
+    if not raw_google or not sheet_url:
         print("❌ Thiếu GOOGLE_SERVICE_JSON hoặc SHEET_URL")
         return
 
-    # parse JSON và authorize gspread
     try:
-        service_account_info = json.loads(raw_json)
-        creds = Credentials.from_service_account_info(service_account_info)
+        info = json.loads(raw_google)
+        creds = Credentials.from_service_account_info(info)
         client = gspread.authorize(creds)
-        print("✅ GOOGLE_SERVICE_JSON hợp lệ và authorized")
+        print("✅ Authorized Google Sheets")
     except Exception as e:
         print("❌ Lỗi xử lý GOOGLE_SERVICE_JSON hoặc authorize:", e)
         return
 
-    # Lấy dữ liệu từ Sheets
     try:
         sheet = client.open_by_url(sheet_url)
-        worksheet = sheet.worksheet("DATA")
-        data = pd.DataFrame(worksheet.get_all_records())
-        print("✅ Lấy dữ liệu từ Google Sheets thành công")
+        df = pd.DataFrame(sheet.worksheet("DATA").get_all_records())
+        print("✅ Lấy dữ liệu từ Google Sheets:", df.shape)
     except Exception as e:
         print("❌ Lỗi truy cập Google Sheets:", e)
         return
 
-    # Tiền xử lý dữ liệu...
-    data.columns = data.columns.str.strip()
-    required_columns = ["NGÀY", "GIỜ", "temperature", "humidity", "soil_moisture", "wind", "rain"]
-    if not all(col in data.columns for col in required_columns):
-        missing = set(required_columns) - set(data.columns)
-        print("❌ Dữ liệu thiếu cột cần thiết:", missing)
+    # --- Preprocess ---
+    df.columns = df.columns.str.strip()
+    need = ["NGÀY","GIỜ","temperature","humidity","soil_moisture","wind","rain"]
+    if not all(c in df.columns for c in need):
+        print("❌ Thiếu cột:", set(need)-set(df.columns))
         return
 
     try:
-        data['timestamp'] = pd.to_datetime(
-            data['NGÀY'] + ' ' + data['GIỜ'],
-            format='%d/%m/%Y %H:%M:%S'
+        df['timestamp'] = pd.to_datetime(
+            df['NGÀY'] + ' ' + df['GIỜ'], format='%d/%m/%Y %H:%M:%S'
         )
-        print("✅ Đã tạo cột timestamp")
+        print("✅ Tạo cột timestamp")
     except Exception as e:
-        print("❌ Lỗi chuyển đổi thời gian:", e)
+        print("❌ Lỗi format timestamp:", e)
         return
 
-    data = data.sort_values('timestamp').reset_index(drop=True)
-    data.rename(columns={
-        'temperature': 'temp', 'humidity': 'humid',
-        'soil_moisture': 'soil', 'wind': 'wind', 'rain': 'rain'
-    }, inplace=True)
+    df = df.sort_values('timestamp').reset_index(drop=True)
+    df.rename(columns={'temperature':'temp','humidity':'humid','soil_moisture':'soil'}, inplace=True)
 
-    # Nối với data cũ nếu có
+    # --- Merge old data ---
     if os.path.exists("training_data.csv"):
         try:
-            old_data = pd.read_csv("training_data.csv", parse_dates=["timestamp"])
-            data = pd.concat([old_data, data], ignore_index=True)
-            print(f"🔁 Nối dữ liệu cũ: {len(old_data)} + mới: {len(data)-len(old_data)}")
+            old = pd.read_csv("training_data.csv", parse_dates=["timestamp"])
+            df = pd.concat([old, df], ignore_index=True)
+            print(f"🔁 Nối: cũ {len(old)} + mới {len(df)-len(old)}")
         except Exception as e:
             print("⚠️ Lỗi đọc training_data.csv:", e)
+    df.drop_duplicates("timestamp", keep="last", inplace=True)
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    print("✅ Data sau xử lý:", df.shape)
 
-    data.drop_duplicates(subset="timestamp", keep="last", inplace=True)
-    data = data.sort_values("timestamp").reset_index(drop=True)
-    print("✅ Dữ liệu tổng sau xử lý:", data.shape)
-
-    # Lấy last_timestamp
-    saved_ts = None
+    # --- Check last_timestamp ---
+    last_ts = None
     if os.path.exists("last_timestamp.json"):
         try:
-            with open("last_timestamp.json", "r") as f:
-                saved_ts = pd.to_datetime(json.load(f)["last_timestamp"])
-                print("🧪 Lần cuối huấn luyện lúc:", saved_ts)
+            with open("last_timestamp.json") as f:
+                last_ts = pd.to_datetime(json.load(f)["last_timestamp"])
+                print("🧪 Lần cuối huấn luyện:", last_ts)
         except Exception as e:
             print("⚠️ Lỗi đọc last_timestamp.json:", e)
 
-    latest_ts = data["timestamp"].iloc[-1]
-    print("🆕 Timestamp mới nhất:", latest_ts)
-    if saved_ts and latest_ts <= saved_ts:
+    newest = df["timestamp"].iloc[-1]
+    print("🆕 Timestamp mới nhất:", newest)
+    if last_ts and newest <= last_ts:
         print("🟡 KHÔNG có dữ liệu mới.")
         send_email_notification("🟡 KHÔNG có dữ liệu mới để huấn luyện.")
         return
 
-    # Chuẩn bị dữ liệu huấn luyện
-    features = ['temp', 'humid', 'soil', 'wind', 'rain']
-    data.dropna(subset=features, inplace=True)
+    # --- Scale & windowing ---
+    feats = ['temp','humid','soil','wind','rain']
+    df.dropna(subset=feats, inplace=True)
     scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(data[features])
-    print("✅ Scale dữ liệu:", scaled.shape)
+    scaled = scaler.fit_transform(df[feats])
+    print("✅ Scale xong:", scaled.shape)
 
-    # Xây dựng hoặc load model
-    model_path = "gru_weather_model.h5"
-    window_size = 6
-    if not os.path.exists(model_path):
-        print("📦 Tạo mới GRU model...")
-        model = Sequential([
-            Input(shape=(window_size, len(features))),
-            GRU(64),
-            Dense(len(features))
-        ])
-        model.compile(optimizer="adam", loss=MeanSquaredError())
+    # --- Model setup ---
+    mdl_file = "gru_weather_model.h5"
+    win = 6
+    if not os.path.exists(mdl_file):
+        print("📦 Tạo model GRU mới")
+        model = Sequential([Input((win,len(feats))), GRU(64), Dense(len(feats))])
+        model.compile("adam", MeanSquaredError())
     else:
-        print("📦 Load model hiện có...")
-        model = load_model(model_path, compile=False)
-        model.compile(optimizer="adam", loss=MeanSquaredError())
+        print("📦 Load model hiện có")
+        model = load_model(mdl_file, compile=False)
+        model.compile("adam", MeanSquaredError())
 
-    # Tạo dữ liệu X,y
-    X, y = [], []
-    for i in range(len(scaled) - window_size):
-        X.append(scaled[i:i+window_size])
-        y.append(scaled[i+window_size])
-    X, y = np.array(X), np.array(y)
-    print(f"📊 Dữ liệu huấn luyện: X={X.shape}, y={y.shape}")
+    # --- Prepare X,y ---
+    X,y = [],[]
+    for i in range(len(scaled)-win):
+        X.append(scaled[i:i+win])
+        y.append(scaled[i+win])
+    X,y = np.array(X), np.array(y)
+    print(f"📊 X={X.shape}, y={y.shape}")
 
-    # Huấn luyện
-    print("🟢 Huấn luyện model...")
-    model.fit(
-        X, y,
-        epochs=100, batch_size=16,
-        callbacks=[EarlyStopping(monitor="loss", patience=5)],
-        verbose=0
-    )
-    model.save(model_path)
-    print("✅ Lưu model xong")
+    # --- Train & save ---
+    print("🟢 Training...")
+    model.fit(X, y,
+              epochs=100, batch_size=16,
+              callbacks=[EarlyStopping("loss", patience=5)],
+              verbose=0)
+    model.save(mdl_file)
+    print("✅ Model saved")
 
-    # Cập nhật training_data & last_timestamp
-    data.to_csv("training_data.csv", index=False)
-    with open("last_timestamp.json", "w") as f:
-        json.dump({"last_timestamp": str(latest_ts)}, f)
+    # --- Lưu data & timestamp ---
+    df.to_csv("training_data.csv", index=False)
+    with open("last_timestamp.json","w") as f:
+        json.dump({"last_timestamp": str(newest)}, f)
 
-    # Dự báo 24h tiếp theo
-    seq = scaled[-window_size:].copy()
-    preds = []
+    # --- Forecast next 24h ---
+    seq = scaled[-win:].copy()
+    preds=[]
     for _ in range(24):
-        p = model.predict(seq.reshape(1, window_size, -1), verbose=0)[0]
+        p = model.predict(seq.reshape(1,win,-1), verbose=0)[0]
         preds.append(p)
         seq = np.vstack([seq[1:], p])
     orig = scaler.inverse_transform(preds)
-    df_fore = pd.DataFrame(orig, columns=features).clip(lower=0).round(2)
-
-    # Thêm cột time
+    fut = pd.DataFrame(orig, columns=feats).clip(lower=0).round(2)
     base = datetime.now(timezone("Asia/Ho_Chi_Minh")) + timedelta(days=1)
     base = base.replace(hour=0, minute=0)
-    df_fore.insert(
-        0, "time",
-        [(base + timedelta(hours=i)).strftime("%d/%m/%Y %H:%M") for i in range(24)]
-    )
-    df_fore.to_json("latest_prediction.json", orient="records", indent=2)
-    print("📁 Lưu dự báo vào latest_prediction.json")
+    fut.insert(0, "time", [(base+timedelta(hours=i)).strftime("%d/%m/%Y %H:%M") for i in range(24)])
+    fut.to_json("latest_prediction.json", orient="records", indent=2)
+    print("📁 Saved latest_prediction.json")
 
-    # Cập nhật Firebase
+    # --- Firebase update ---
     try:
         if not firebase_admin._apps:
-            raw_fb = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
-            if raw_fb:
-                raw_fb = raw_fb.replace('\\n', '\n')
-            if not raw_fb:
-                raise ValueError("Missing FIREBASE_SERVICE_ACCOUNT_JSON")
-            fb_info = json.loads(raw_fb)
-            cred = credentials.Certificate(fb_info)
+            raw_fb = load_json_from_env("FIREBASE_SERVICE_ACCOUNT_JSON_B64","FIREBASE_SERVICE_ACCOUNT_JSON")
+            info_fb = json.loads(raw_fb)
+            cred = credentials.Certificate(info_fb)
             firebase_admin.initialize_app(cred, {
-                "databaseURL": "https://smart-farm-6e42d-default-rtdb.firebaseio.com/"
+                "databaseURL":"https://smart-farm-6e42d-default-rtdb.firebaseio.com/"
             })
-        db.reference("forecast/tomorrow").set(df_fore.to_dict(orient="records"))
+        db.reference("forecast/tomorrow").set(fut.to_dict("records"))
         print("📡 Đã cập nhật Firebase.")
     except Exception as e:
         print("❌ Lỗi cập nhật Firebase:", e)
 
-    # Gửi thông báo email
+    # --- Gửi email ---
     send_email_notification("🟢 Dự báo mới đã được huấn luyện và cập nhật.")
     print("✅ XONG lúc", datetime.now(timezone("Asia/Ho_Chi_Minh")).strftime("%H:%M:%S %d/%m/%Y"))
 
