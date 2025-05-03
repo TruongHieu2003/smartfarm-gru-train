@@ -1,4 +1,10 @@
 import os, json, time, base64
+# Suppress TensorFlow and absl warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+import logging
+import absl.logging
+absl.logging.set_verbosity(absl.logging.ERROR)
+
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -151,7 +157,7 @@ def run_training_and_forecast():
     print("✅ Scale xong:", scaled.shape)
 
     # --- Model setup ---
-    mdl_file = "gru_weather_model.h5"
+    mdl_file = "gru_weather_model.keras"
     win = 6
     if not os.path.exists(mdl_file):
         print("📦 Tạo model GRU mới")
@@ -220,4 +226,4 @@ def run_training_and_forecast():
 if __name__ == "__main__":
     while True:
         run_training_and_forecast()
-        time.sleep(300)
+        time.sleep(600)
