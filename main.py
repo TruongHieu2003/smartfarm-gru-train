@@ -108,7 +108,7 @@ def run_training_and_forecast():
     scaler = MinMaxScaler()
     scaled_data = scaler.fit_transform(data[features])
 
-    model_path = "gru_weather_model.keras"
+    model_path = "gru_weather_model.h5"
     window_size = 6
 
     if not os.path.exists(model_path):
