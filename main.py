@@ -53,9 +53,6 @@ def run_training_and_forecast():
     json_str = os.environ.get("GOOGLE_SERVICE_JSON")
     sheet_url = os.environ.get("SHEET_URL")
 
-    print("🧪 GOOGLE_SERVICE_JSON is set:", json_str is not None)
-    print("📄 SHEET_URL =", sheet_url)
-
     if not json_str or not sheet_url:
         print("❌ Thiếu GOOGLE_SERVICE_JSON hoặc SHEET_URL")
         return
@@ -72,11 +69,16 @@ def run_training_and_forecast():
         return
 
     data.columns = data.columns.str.strip()
+
+    required_columns = ["NGÀY", "GIỜ", "temperature", "humidity", "soil_moisture", "wind", "rain"]
+    if not all(col in data.columns for col in required_columns):
+        print("❌ Dữ liệu thiếu cột cần thiết:", set(required_columns) - set(data.columns))
+        return
+
     try:
         data['timestamp'] = pd.to_datetime(data['NGÀY'] + ' ' + data['GIỜ'], format='%d/%m/%Y %H:%M:%S')
-    except KeyError as e:
-        print("❌ Lỗi cột thiếu:", e)
-        print("📋 Danh sách cột:", data.columns.tolist())
+    except Exception as e:
+        print("❌ Lỗi chuyển đổi thời gian:", e)
         return
 
     data = data.sort_values('timestamp')
@@ -85,26 +87,37 @@ def run_training_and_forecast():
         'wind': 'wind', 'rain': 'rain'
     }, inplace=True)
 
-    # Tích lũy dữ liệu cũ
+    # Tích lũy dữ liệu
     if os.path.exists("training_data.csv"):
-        old_data = pd.read_csv("training_data.csv", parse_dates=["timestamp"])
-        data = pd.concat([old_data, data])
-        data.drop_duplicates(subset="timestamp", keep="last", inplace=True)
-        data = data.sort_values("timestamp")
+        try:
+            old_data = pd.read_csv("training_data.csv", parse_dates=["timestamp"])
+            data = pd.concat([old_data, data])
+        except Exception as e:
+            print("⚠️ Lỗi đọc training_data.csv:", e)
 
+    data.drop_duplicates(subset="timestamp", keep="last", inplace=True)
+    data = data.sort_values("timestamp").reset_index(drop=True)
+
+    # Kiểm tra thời gian
     saved_timestamp = None
     if os.path.exists("last_timestamp.json"):
-        with open("last_timestamp.json", "r") as f:
-            saved_timestamp = pd.to_datetime(json.load(f)["last_timestamp"])
+        try:
+            with open("last_timestamp.json", "r") as f:
+                saved_timestamp = pd.to_datetime(json.load(f)["last_timestamp"])
+        except Exception as e:
+            print("⚠️ Lỗi đọc last_timestamp.json:", e)
 
     latest_timestamp = data["timestamp"].iloc[-1]
-
     if saved_timestamp is not None and latest_timestamp <= saved_timestamp:
         print("🟡 KHÔNG có dữ liệu mới.")
         send_email_notification("🟡 KHÔNG có dữ liệu mới để huấn luyện.")
         return
 
     features = ['temp', 'humid', 'soil', 'wind', 'rain']
+    if data[features].isnull().any().any():
+        print("⚠️ Có giá trị thiếu trong dữ liệu. Loại bỏ dòng lỗi.")
+        data.dropna(subset=features, inplace=True)
+
     scaler = MinMaxScaler()
     scaled_data = scaler.fit_transform(data[features])
 
@@ -115,7 +128,7 @@ def run_training_and_forecast():
         model = Sequential([
             Input(shape=(window_size, len(features))),
             GRU(units=64),
-            Dense(5)
+            Dense(len(features))
         ])
         model.compile(optimizer="adam", loss=MeanSquaredError())
     else:
@@ -127,6 +140,7 @@ def run_training_and_forecast():
     for i in range(len(scaled_data) - window_size):
         X.append(scaled_data[i:i + window_size])
         y.append(scaled_data[i + window_size])
+
     model.fit(np.array(X), np.array(y), epochs=100, batch_size=16,
               callbacks=[EarlyStopping(monitor="loss", patience=5)], verbose=0)
     model.save(model_path)
@@ -135,7 +149,7 @@ def run_training_and_forecast():
     with open("last_timestamp.json", "w") as f:
         json.dump({"last_timestamp": str(latest_timestamp)}, f)
 
-    # Dự báo
+    # Dự báo 24 giờ tiếp theo
     current_seq = scaled_data[-window_size:].copy()
     forecast = []
     for _ in range(24):
@@ -143,11 +157,16 @@ def run_training_and_forecast():
         y_pred = model.predict(x_input, verbose=0)
         forecast.append(y_pred[0])
         current_seq = np.vstack([current_seq[1:], y_pred])
+
     forecast_original = scaler.inverse_transform(np.array(forecast))
     forecast_df = pd.DataFrame(forecast_original, columns=features).clip(lower=0).round(2)
+
+    # Tạo thời gian dự báo
     base_time = datetime.now(timezone("Asia/Ho_Chi_Minh")) + timedelta(days=1)
     base_time = base_time.replace(hour=0, minute=0)
     forecast_df.insert(0, "time", [(base_time + timedelta(hours=i)).strftime("%d/%m/%Y %H:%M") for i in range(24)])
+
+    # Lưu local
     forecast_df.to_json("latest_prediction.json", orient="records", indent=2)
 
     try:
@@ -160,13 +179,14 @@ def run_training_and_forecast():
             firebase_admin.initialize_app(cred, {
                 "databaseURL": "https://smart-farm-6e42d-default-rtdb.firebaseio.com/"
             })
+
         db.reference("forecast/tomorrow").set(forecast_df.to_dict(orient="records"))
+        print("📡 Đã cập nhật Firebase.")
     except Exception as e:
         print("❌ Lỗi cập nhật Firebase:", e)
 
     send_email_notification("🟢 Dự báo mới đã được huấn luyện và cập nhật.")
     print("✅ XONG lúc", datetime.now(timezone("Asia/Ho_Chi_Minh")).strftime("%H:%M:%S %d/%m/%Y"))
-
 
 if __name__ == "__main__":
     while True:
