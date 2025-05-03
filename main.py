@@ -53,6 +53,15 @@ def load_json_from_env(b64_var, txt_var):
     return raw.replace('\\n', '\n')
 
 def run_training_and_forecast():
+    # --- One-time reset old training data ---
+    marker = '.first_run_done'
+    if not os.path.exists(marker):
+        for f in ("training_data.csv", "last_timestamp.json"):
+            if os.path.exists(f):
+                os.remove(f)
+                print(f"🗑 Removed old file {f} (one-time reset)")
+        open(marker, 'w').close()
+
     print("\n🔁 Bắt đầu kiểm tra và huấn luyện...\n")
 
     # --- Google Sheets credentials & data load ---
