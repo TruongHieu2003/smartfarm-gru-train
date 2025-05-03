@@ -10,7 +10,7 @@ from tensorflow.keras.layers import GRU, Dense, Input
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.losses import MeanSquaredError
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials  # ✅ MỚI
 import firebase_admin
 from firebase_admin import credentials, db
 import smtplib
@@ -49,7 +49,6 @@ def send_email_notification(message):
 def run_training_and_forecast():
     print("\n🔁 Bắt đầu kiểm tra và huấn luyện...")
 
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     json_str = os.environ.get("GOOGLE_SERVICE_JSON")
     sheet_url = os.environ.get("SHEET_URL")
 
@@ -58,9 +57,11 @@ def run_training_and_forecast():
         return
 
     try:
-        google_key = json.loads(json_str)
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(google_key, scope)
+        # ✅ Dùng chuẩn google-auth
+        service_account_info = json.loads(json_str)
+        creds = Credentials.from_service_account_info(service_account_info)
         client = gspread.authorize(creds)
+
         sheet = client.open_by_url(sheet_url.strip())
         worksheet = sheet.worksheet("DATA")
         data = pd.DataFrame(worksheet.get_all_records())
